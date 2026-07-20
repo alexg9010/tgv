@@ -1,6 +1,6 @@
 /// The main app object
 ///
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{Terminal, buffer::Buffer, prelude::Backend};
 
 use crate::{
@@ -21,8 +21,15 @@ pub enum Scene {
     ContigList,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum AppRunOutcome {
+    Exit,
+    Suspend,
+}
+
 pub struct App {
     pub exit: bool,
+    initialized: bool,
     pub session_path: PathBuf,
 
     pub layout: MainLayout,
@@ -79,6 +86,7 @@ impl App {
 
         Ok(Self {
             exit: false,
+            initialized: false,
             session_path,
             layout: MainLayout::new(&settings, &repository_file_indexes),
             alignment_view,
@@ -94,7 +102,10 @@ impl App {
 
 impl App {
     /// Main loop
-    pub async fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<(), TGVError> {
+    pub async fn run<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+    ) -> Result<AppRunOutcome, TGVError> {
         log::info!("Starting the app event loop");
         terminal
             .draw(|frame| {
@@ -102,15 +113,22 @@ impl App {
             })
             .map_err(|e| TGVError::IOError(format!("Failed to draw the terminal: {e}")))?;
 
-        self.handle(self.settings.initial_state_messages.clone())
-            .await?;
+        if !self.initialized {
+            self.handle(self.settings.initial_state_messages.clone())
+                .await?;
 
-        self.alignment_view.self_correct(
-            &self.layout.main_area,
-            self.state.contig_length(&self.alignment_view.focus)?,
-        );
+            self.alignment_view.self_correct(
+                &self.layout.main_area,
+                self.state.contig_length(&self.alignment_view.focus)?,
+            );
+            self.initialized = true;
+        }
 
-        while !self.exit {
+        let outcome = loop {
+            if self.exit {
+                break AppRunOutcome::Exit;
+            }
+
             // Render
             // FIXME: improve rendering performance. Not all sections need to be re-rendered at every loop.
             //
@@ -127,12 +145,21 @@ impl App {
             render_result?;
 
             if self.settings.test_mode {
-                break;
+                break AppRunOutcome::Exit;
             }
 
             // handle events
+            let event = event::read();
+            if matches!(
+                &event,
+                Ok(Event::Key(key_event))
+                    if key_event.kind == KeyEventKind::Press && is_suspend_request(*key_event)
+            ) {
+                break AppRunOutcome::Suspend;
+            }
+
             match {
-                match event::read() {
+                match event {
                     Ok(Event::Key(key_event)) if key_event.kind == KeyEventKind::Press => {
                         let state_messages =
                             self.registers.handle_key_event(key_event, &self.state)?;
@@ -178,9 +205,9 @@ impl App {
             if refresh_terminal {
                 terminal.clear()?;
             }
-        }
-        log::info!("The app event loop exited");
-        Ok(())
+        };
+        log::info!("The app event loop exited with outcome {outcome:?}");
+        Ok(outcome)
     }
 
     /// close connections
@@ -516,4 +543,14 @@ impl App {
             ),
         }
     }
+}
+
+#[cfg(unix)]
+fn is_suspend_request(key_event: crossterm::event::KeyEvent) -> bool {
+    key_event.code == KeyCode::Char('z') && key_event.modifiers == KeyModifiers::CONTROL
+}
+
+#[cfg(not(unix))]
+fn is_suspend_request(_key_event: crossterm::event::KeyEvent) -> bool {
+    false
 }

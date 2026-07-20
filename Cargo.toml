@@ -15,6 +15,7 @@ crossterm = "0"
 csv = "1"
 futures = "0"
 itertools = "0"
+libc = "0.2"
 log = { version = "0.4", features = ["std"] }
 native-tls = { version = "0.2", features = ["vendored"] }
 nom = "8"
@@ -24,6 +25,7 @@ ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
+signal-hook = "0.3"
 toml = "0.8"
 shellexpand = "3.1"
 sqlx = { version = "0.7", features = ["mysql", "sqlite", "runtime-tokio-rustls"] }

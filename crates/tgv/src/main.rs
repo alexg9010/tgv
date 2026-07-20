@@ -2,6 +2,7 @@ use clap::Parser;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
+    terminal::{EnterAlternateScreen, enable_raw_mode},
 };
 use gv_core::error::TGVError;
 use gv_core::logging::{init_file_logging_with_level, timestamped_log_file_name};
@@ -9,7 +10,7 @@ use gv_core::reference::Reference;
 use gv_core::tracks::{UCSCDownloader, UcscDbTrackService};
 use std::{io::stdout, path::PathBuf};
 use tgv::{
-    app::App,
+    app::{App, AppRunOutcome},
     session::SessionFile,
     settings::{Cli, Commands, Settings},
 };
@@ -117,7 +118,26 @@ async fn main() -> Result<(), TGVError> {
             return Err(e);
         }
     };
-    let app_result = app.run(&mut terminal).await;
+    let app_result = loop {
+        match app.run(&mut terminal).await {
+            Ok(AppRunOutcome::Exit) => break Ok(()),
+            Ok(AppRunOutcome::Suspend) => {
+                let suspend_result = ratatui::try_restore()
+                    .map_err(TGVError::from)
+                    .and_then(|()| execute!(stdout(), DisableMouseCapture).map_err(TGVError::from))
+                    .and_then(|()| suspend_until_foreground())
+                    .and_then(|()| enable_raw_mode().map_err(TGVError::from))
+                    .and_then(|()| execute!(stdout(), EnterAlternateScreen).map_err(TGVError::from))
+                    .and_then(|()| execute!(stdout(), EnableMouseCapture).map_err(TGVError::from))
+                    .and_then(|()| terminal.autoresize().map_err(TGVError::from))
+                    .and_then(|()| terminal.clear().map_err(TGVError::from));
+                if let Err(error) = suspend_result {
+                    break Err(error);
+                }
+            }
+            Err(error) => break Err(error),
+        }
+    };
 
     ratatui::restore();
     if let Err(err) = execute!(stdout(), DisableMouseCapture) {
@@ -149,6 +169,31 @@ async fn main() -> Result<(), TGVError> {
 
 fn default_log_file_path() -> PathBuf {
     PathBuf::from(shellexpand::tilde("~/.tgv").as_ref()).join(timestamped_log_file_name())
+}
+
+#[cfg(unix)]
+fn suspend_until_foreground() -> Result<(), TGVError> {
+    use signal_hook::{consts::signal::SIGTSTP, low_level};
+
+    low_level::emulate_default_handler(SIGTSTP)?;
+
+    loop {
+        // Reclaim the terminal only after `fg`; `bg` also sends SIGCONT.
+        let foreground_process_group = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+        if foreground_process_group == -1 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        if foreground_process_group == unsafe { libc::getpgrp() } {
+            return Ok(());
+        }
+
+        low_level::emulate_default_handler(SIGTSTP)?;
+    }
+}
+
+#[cfg(not(unix))]
+fn suspend_until_foreground() -> Result<(), TGVError> {
+    Ok(())
 }
 
 fn print_common_genomes() -> Result<usize, TGVError> {
